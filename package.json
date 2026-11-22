@@ -1,0 +1,13 @@
+{
+  "name": "voice-lookup-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "cap:add:android": "npx cap add android",
+    "cap:sync": "npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/cli": "^6.1.2",
+    "@capacitor/core": "^6.1.2"
+  }
+}
