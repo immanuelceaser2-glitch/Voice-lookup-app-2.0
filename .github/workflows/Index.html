@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Offline Voice Lookup</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-text: #082f49;
+      --border: #334155;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 16px;
+      line-height: 1.4;
+    }
+    .app { max-width: 720px; margin: 0 auto; display: grid; gap: 14px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    h1 { margin: 0 0 6px; font-size: 1.25rem; }
+    .meta { color: var(--muted); font-size: 0.875rem; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+    button, .file-btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      padding: 14px 12px;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      min-height: 52px;
+    }
+    button.primary {
+      background: var(--accent);
+      color: var(--accent-text);
+      border-color: var(--accent);
+    }
+    button:active, .file-btn:active { transform: scale(0.99); }
+    input[type="search"] {
+      width: 100%;
+      padding: 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      font-size: 1.05rem;
+      margin-top: 10px;
+    }
+    input[type="file"] { display: none; }
+    .status { margin-top: 10px; font-size: 0.9rem; color: var(--accent); min-height: 1.2em; }
+    .error { color: var(--danger); }
+    .results { display: grid; gap: 10px; }
+    .item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .item-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .code { font-weight: 700; color: var(--accent); font-size: 1.05rem; }
+    .kv { margin-top: 6px; font-size: 0.92rem; color: var(--text); }
+    .kv span { color: var(--muted); }
+    .item-actions { margin-top: 10px; }
+    .item-actions button { min-height: 40px; padding: 8px 12px; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <h1>Offline Voice Lookup</h1>
+      <div class="meta" id="datasetMeta">No CSV loaded yet.</div>
+
+      <input
+        id="searchInput"
+        type="search"
+        placeholder="Type or speak a code, name, or location..."
+        autocomplete="off"
+      />
+
+      <div class="controls">
+        <button id="voiceBtn" class="primary" type="button">🎤 Speak Query</button>
+        <button id="readTopBtn" type="button">🔊 Read Top Match</button>
+        <label class="file-btn" for="csvInput">📂 Load CSV</label>
+        <button id="clearBtn" type="button">🗑️ Clear Data</button>
+      </div>
+      <input id="csvInput" type="file" accept=".csv,text/csv" />
+
+      <div class="status" id="statusBar" role="status"></div>
+    </div>
+
+    <div class="results" id="resultsList"></div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "offline_voice_lookup_rows_v1";
+    const META_KEY = "offline_voice_lookup_meta_v1";
+
+    const searchInput = document.getElementById("searchInput");
+    const voiceBtn = document.getElementById("voiceBtn");
+    const readTopBtn = document.getElementById("readTopBtn");
+    const csvInput = document.getElementById("csvInput");
+    const clearBtn = document.getElementById("clearBtn");
+    const resultsList = document.getElementById("resultsList");
+    const statusBar = document.getElementById("statusBar");
+    const datasetMeta = document.getElementById("datasetMeta");
+
+    let rows = [];
+    let currentMatches = [];
+
+    function setStatus(msg, isError = false) {
+      statusBar.textContent = msg || "";
+      statusBar.className = isError ? "status error" : "status";
+    }
+
+    // RFC-4180 style CSV parser handling quoted fields and commas/newlines inside quotes
+    function parseCSV(text) {
+      const out = [];
+      let row = [];
+      let field = "";
+      let inQuotes = false;
+
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const next = text[i + 1];
+
+        if (inQuotes) {
+          if (ch === '"' && next === '"') {
+            field += '"';
+            i++;
+          } else if (ch === '"') {
+            inQuotes = false;
+          } else {
+            field += ch;
+          }
+        } else {
+          if (ch === '"') {
+            inQuotes = true;
+          } else if (ch === ",") {
+            row.push(field.trim());
+            field = "";
+          } else if (ch === "\n" || ch === "\r") {
+            if (ch === "\r" && next === "\n") i++;
+            row.push(field.trim());
+            if (row.some((c) => c !== "")) out.push(row);
+            row = [];
+            field = "";
+          } else {
+            field += ch;
+          }
+        }
+      }
+      if (field.length > 0 || row.length > 0) {
+        row.push(field.trim());
+        if (row.some((c) => c !== "")) out.push(row);
+      }
+
+      if (out.length < 2) return [];
+      const headers = out[0].map((h, idx) => h || `col_${idx + 1}`);
+      return out.slice(1).map((vals) => {
+        const obj = {};
+        headers.forEach((h, idx) => {
+          obj[h] = vals[idx] ?? "";
+        });
+        return obj;
+      });
+    }
+
+    function saveDataset(parsedRows, fileName) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedRows));
+        const meta = { fileName, count: parsedRows.length, updatedAt: new Date().toLocaleString() };
+        localStorage.setItem(META_KEY, JSON.stringify(meta));
+        rows = parsedRows;
+        renderMeta(meta);
+        runSearch(searchInput.value);
+        setStatus(`Loaded ${parsedRows.length} rows from ${fileName}.`);
+      } catch (err) {
+        setStatus("Storage quota exceeded or blocked. Try a smaller CSV.", true);
+      }
+    }
+
+    function loadSavedDataset() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const metaRaw = localStorage.getItem(META_KEY);
+        if (raw) {
+          rows = JSON.parse(raw);
+          renderMeta(metaRaw ? JSON.parse(metaRaw) : { fileName: "Saved data", count: rows.length });
+          runSearch("");
+        }
+      } catch {
+        setStatus("Could not read saved data.", true);
+      }
+    }
+
+    function renderMeta(meta) {
+      datasetMeta.textContent = `${meta.count} records • ${meta.fileName}${meta.updatedAt ? ` • ${meta.updatedAt}` : ""}`;
+    }
+
+    function formatRowForSpeech(obj) {
+      return Object.entries(obj)
+        .filter(([, v]) => String(v).trim() !== "")
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(". ");
+    }
+
+    function speakText(text) {
+      if (!("speechSynthesis" in window)) {
+        setStatus("Text-to-speech not supported on this browser.", true);
+        return;
+      }
+      if (!text) {
+        setStatus("Nothing to read out.");
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 1.0;
+      utter.onerror = () => setStatus("Speech synthesis error.", true);
+      window.speechSynthesis.speak(utter);
+    }
+
+    function escapeHTML(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function renderResults(matches) {
+      currentMatches = matches;
+      resultsList.innerHTML = "";
+
+      if (!rows.length) {
+        resultsList.innerHTML = '<div class="item"><div class="meta">Load a CSV file to search records offline.</div></div>';
+        return;
+      }
+      if (!matches.length) {
+        resultsList.innerHTML = '<div class="item"><div class="meta">No matching records found.</div></div>';
+        return;
+      }
+
+      const slice = matches.slice(0, 25);
+      slice.forEach((obj) => {
+        const keys = Object.keys(obj);
+        const primaryVal = obj[keys[0]] || "Record";
+        const secondaryVal = keys[1] ? obj[keys[1]] : "";
+        const speechPayload = formatRowForSpeech(obj);
+
+        const card = document.createElement("div");
+        card.className = "item";
+
+        const detailsHTML = keys
+          .map((k) => `<div class="kv"><span>${escapeHTML(k)}:</span> ${escapeHTML(obj[k])}</div>`)
+          .join("");
+
+        card.innerHTML = `
+          <div class="item-head">
+            <div class="code">${escapeHTML(primaryVal)}</div>
+            <div class="meta">${escapeHTML(secondaryVal)}</div>
+          </div>
+          ${detailsHTML}
+          <div class="item-actions">
+            <button type="button" data-speak="${escapeHTML(speechPayload)}">🔊 Read Record</button>
+          </div>
+        `;
+
+        card.querySelector("button").addEventListener("click", (e) => {
+          speakText(e.currentTarget.getAttribute("data-speak") || "");
+        });
+
+        resultsList.appendChild(card);
+      });
+    }
+
+    function runSearch(query) {
+      const q = query.trim().toLowerCase();
+      if (!q) {
+        renderResults(rows);
+        return;
+      }
+      const tokens = q.split(/\s+/).filter(Boolean);
+      const matches = rows.filter((obj) => {
+        const hay = Object.values(obj).join(" ").toLowerCase();
+        return tokens.every((t) => hay.includes(t));
+      });
+      renderResults(matches);
+      setStatus(`${matches.length} match${matches.length === 1 ? "" : "es"} for "${query.trim()}".`);
+    }
+
+    // Voice recognition setup
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+      recognition.lang = "en-US";
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        voiceBtn.textContent = "🛑 Listening...";
+        setStatus("Listening for query...");
+      };
+      recognition.onresult = (event) => {
+        const transcript = event.results[0]?.[0]?.transcript || "";
+        searchInput.value = transcript;
+        runSearch(transcript);
+        if (currentMatches.length > 0) {
+          speakText(formatRowForSpeech(currentMatches[0]));
+        } else {
+          speakText(`No match found for ${transcript}`);
+        }
+      };
+      recognition.onerror = (event) => {
+        setStatus(`Voice error: ${event.error}`, true);
+      };
+      recognition.onend = () => {
+        voiceBtn.textContent = "🎤 Speak Query";
+      };
+    } else {
+      voiceBtn.disabled = true;
+      voiceBtn.textContent = "🎤 Voice Unavailable";
+      setStatus("SpeechRecognition unavailable in this browser; use text search.", true);
+    }
+
+    voiceBtn.addEventListener("click", () => {
+      if (!recognition) return;
+      try {
+        recognition.start();
+      } catch {
+        recognition.stop();
+      }
+    });
+
+    readTopBtn.addEventListener("click", () => {
+      if (!currentMatches.length) {
+        setStatus("No match to read.");
+        return;
+      }
+      speakText(formatRowForSpeech(currentMatches[0]));
+    });
+
+    csvInput.addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const parsed = parseCSV(String(reader.result || ""));
+        if (!parsed.length) {
+          setStatus("CSV appeared empty or had no data rows.", true);
+          return;
+        }
+        saveDataset(parsed, file.name);
+      };
+      reader.onerror = () => setStatus("Failed to read CSV file.", true);
+      reader.readAsText(file);
+      e.target.value = "";
+    });
+
+    clearBtn.addEventListener("click", () => {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(META_KEY);
+      rows = [];
+      currentMatches = [];
+      searchInput.value = "";
+      renderMeta({ fileName: "No CSV loaded", count: 0 });
+      renderResults([]);
+      setStatus("Cleared saved data.");
+    });
+
+    searchInput.addEventListener("input", (e) => runSearch(e.target.value));
+
+    loadSavedDataset();
+  </script>
+</body>
+</html>
